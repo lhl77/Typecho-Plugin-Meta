@@ -35,7 +35,7 @@
 
 ### 推荐：AB-Store 一键安装
 
-安装 [AdminBeautify](https://github.com/lhl77/Typecho-Plugin-AdminBeautify) 插件后，进入后台 **AB-Store** 应用商店，搜索 **PicUp** 即可一键安装并获取后续更新。
+安装 [AdminBeautify](https://github.com/lhl77/Typecho-Plugin-AdminBeautify) 插件后，进入后台 **AB-Store** 应用商店，搜索 **TypechoMeta** 即可一键安装并获取后续更新。
 
 ### 方式一：下载压缩包
 
