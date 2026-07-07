@@ -33,6 +33,10 @@
 
 ## 安装
 
+### 推荐：AB-Store 一键安装
+
+安装 [AdminBeautify](https://github.com/lhl77/Typecho-Plugin-AdminBeautify) 插件后，进入后台 **AB-Store** 应用商店，搜索 **PicUp** 即可一键安装并获取后续更新。
+
 ### 方式一：下载压缩包
 
 1. 前往 [GitHub 仓库](https://github.com/lhl77/Typecho-Plugin-Meta) 下载源码或发布包
@@ -54,23 +58,6 @@ git clone https://github.com/lhl77/Typecho-Plugin-Meta.git TypechoMeta
 3. 生成结果仅写入表单，需手动保存文章。
 4. 若不使用 AI，也可仅使用 Meta 字段和 SEO 标签增强能力。
 
-## 常见问题
-
-### 1) 提示 AI 接口 404
-
-请检查接口地址是否完整。OpenAI 兼容接口通常为：
-
-`https://api.openai.com/v1/chat/completions`
-
-### 2) 返回非 JSON
-
-请确认模型输出遵循插件提示词，且接口确实返回 JSON。
-
-### 3) 按钮点击无反应
-
-请确认插件已启用，且后台登录状态有效；建议刷新后台后重试。
-
----
 
 <p align="center">
   Made with ❤️ by <a href="https://github.com/lhl77">LHL</a>
