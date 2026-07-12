@@ -4,7 +4,7 @@
  *
  * @package TypechoMeta
  * @author LHL
- * @version 1.0.0
+ * @version 1.0.1
  * @link https://github.com/lhl77/Typecho-Plugin-Meta
  */
 
@@ -22,6 +22,7 @@ use Typecho\Widget\Helper\Form\Element\Checkbox;
 use Typecho\Widget\Helper\Form\Element\Select;
 use Typecho\Widget\Helper\Form\Element\Text;
 use Typecho\Widget\Helper\Form\Element\Textarea;
+use Typecho\Widget\Helper\Form\Element\Hidden;
 use Widget\Archive;
 use Widget\Options;
 
@@ -111,6 +112,7 @@ class TypechoMeta_Plugin implements PluginInterface
     public static function config(Form $form)
     {
         self::ensureActionRegistered();
+        self::sanitizeLegacyConfigKeys();
 
         echo '<div style="margin:0 0 14px;padding:10px 12px;border:1px solid #e5e7eb;border-radius:8px;background:#f8fafc;line-height:1.7;">'
             . '<strong>TypechoMeta</strong>：文章 SEO 元信息与 AI 生成增强插件。<br>'
@@ -189,6 +191,15 @@ class TypechoMeta_Plugin implements PluginInterface
         $seoJsonLd = new Checkbox('seoJsonLd', array('1' => _t('输出 Article JSON-LD')), array('1'), _t('Schema'), _t('结构化数据')); 
         $form->addInput($seoJsonLd);
 
+        $strictDedup = new Checkbox(
+            'seoStrictDedupMode',
+            array('1' => _t('启用去重优先模式（推荐，避免与主题重复输出 canonical / og / twitter）')),
+            array('1'),
+            _t('去重优先模式'),
+            _t('开启后插件将不再输出 canonical / Open Graph / Twitter 标签，仅保留必要的 robots 与 JSON-LD。')
+        );
+        $form->addInput($strictDedup);
+
         $robotsText = new Text(
             'seoRobotsValue',
             null,
@@ -227,7 +238,116 @@ class TypechoMeta_Plugin implements PluginInterface
         $homeKeywords->input->setAttribute('rows', '2');
         $form->addInput($homeKeywords);
 
+        // 兼容历史配置键：为旧键补 hidden input，避免 Typecho 配置回填时触发 value() on null。
+        self::ensureLegacyInputs($form);
+
         self::appendAiTester($form);
+    }
+
+    private static function sanitizeLegacyConfigKeys(): void
+    {
+        try {
+            $settings = self::getPluginSettings();
+            if (!is_object($settings) || !method_exists($settings, 'toArray')) {
+                return;
+            }
+
+            $current = $settings->toArray();
+            if (!is_array($current) || empty($current)) {
+                return;
+            }
+
+            $allowed = self::allowedConfigKeys();
+
+            $allowedMap = array_fill_keys($allowed, true);
+            $filtered = array();
+            $hasLegacyKey = false;
+
+            foreach ($current as $key => $value) {
+                if (isset($allowedMap[$key])) {
+                    $filtered[$key] = $value;
+                } else {
+                    $hasLegacyKey = true;
+                }
+            }
+
+            if ($hasLegacyKey) {
+                \Utils\Helper::configPlugin('TypechoMeta', $filtered);
+            }
+        } catch (\Throwable $e) {
+            // 忽略清理异常，避免影响配置页打开。
+        }
+    }
+
+    private static function ensureLegacyInputs(Form $form): void
+    {
+        try {
+            $settings = self::getPluginSettings();
+            if (!is_object($settings) || !method_exists($settings, 'toArray')) {
+                return;
+            }
+
+            $current = $settings->toArray();
+            if (!is_array($current) || empty($current)) {
+                return;
+            }
+
+            $allowedMap = array_fill_keys(self::allowedConfigKeys(), true);
+
+            foreach ($current as $key => $value) {
+                $name = (string) $key;
+                if ($name === '' || isset($allowedMap[$name])) {
+                    continue;
+                }
+
+                // 防止意外键名污染表单结构，仅保留安全字符。
+                if (!preg_match('/^[A-Za-z0-9_\-]+$/', $name)) {
+                    continue;
+                }
+
+                if ($form->getInput($name) !== null) {
+                    continue;
+                }
+
+                if (is_array($value)) {
+                    $value = implode(',', array_map('strval', $value));
+                } elseif (is_object($value)) {
+                    $value = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                }
+
+                $hidden = new Hidden($name, null, (string) $value);
+                $form->addInput($hidden);
+            }
+        } catch (\Throwable $e) {
+            // 忽略兜底异常，不影响主配置渲染。
+        }
+    }
+
+    private static function allowedConfigKeys(): array
+    {
+        return array(
+            'aiProvider',
+            'aiApiUrl',
+            'aiModel',
+            'aiToken',
+            'aiTemperature',
+            'aiTimeout',
+            'aiContentLimit',
+            'aiDescriptionMaxLen',
+            'aiKeywordsMaxCount',
+            'aiPromptTemplate',
+            'enableAdvancedSeo',
+            'seoCanonical',
+            'seoRobots',
+            'seoOg',
+            'seoTwitter',
+            'seoJsonLd',
+            'seoStrictDedupMode',
+            'seoRobotsValue',
+            'homeMetaTitle',
+            'homeMetaDescription',
+            'homeMetaKeywords'
+        );
     }
 
     public static function personalConfig(Form $form)
@@ -268,9 +388,15 @@ class TypechoMeta_Plugin implements PluginInterface
 
     public static function applyArchiveMeta($allows, $archive)
     {
-        if ($archive->is('index')) {
-            $settings = self::getPluginSettings();
+        $settings = self::getPluginSettings();
+        $strictDedupMode = self::isChecked($settings->seoStrictDedupMode ?? array('1'));
 
+        // 去重优先模式：关闭 Typecho 内核默认 social 输出（og/twitter），避免与主题重复。
+        if ($strictDedupMode) {
+            $allows['social'] = 0;
+        }
+
+        if ($archive->is('index')) {
             $homeTitle = trim((string) ($settings->homeMetaTitle ?? ''));
             $homeDescription = trim((string) ($settings->homeMetaDescription ?? ''));
             $homeKeywords = trim((string) ($settings->homeMetaKeywords ?? ''));
@@ -327,12 +453,127 @@ class TypechoMeta_Plugin implements PluginInterface
 
     public static function renderSeoEnhancements($header, $archive): void
     {
-        if (!$archive->is('single')) {
+        $settings = self::getPluginSettings();
+        if (!self::isChecked($settings->enableAdvancedSeo ?? array('1'))) {
+            return;
+        }
+        $strictDedupMode = self::isChecked($settings->seoStrictDedupMode ?? array('1'));
+
+        $head = is_string($header) ? $header : '';
+
+        if ($archive->is('index')) {
+            $siteUrl = rtrim((string) ($archive->options->siteUrl ?? ''), '/');
+            $url = $siteUrl !== '' ? $siteUrl . '/' : htmlspecialchars((string) $archive->options->index, ENT_QUOTES, 'UTF-8');
+
+            $siteName = trim((string) ($archive->options->title ?? ''));
+            if ($siteName === '') {
+                $siteName = (string) parse_url((string) $url, PHP_URL_HOST);
+            }
+
+            $homeTitle = trim((string) ($settings->homeMetaTitle ?? ''));
+            $homeDescription = trim((string) ($settings->homeMetaDescription ?? ''));
+            $homeKeywords = trim((string) ($settings->homeMetaKeywords ?? ''));
+            $title = $homeTitle !== '' ? $homeTitle : $siteName;
+            $description = $homeDescription !== ''
+                ? $homeDescription
+                : trim((string) ($archive->options->description ?? ''));
+
+            $chunks = array();
+
+            if (self::isChecked($settings->seoCanonical ?? array('1')) && !self::headHasCanonical($head)) {
+                $tag = '<link rel="canonical" href="' . htmlspecialchars($url, ENT_QUOTES, 'UTF-8') . '" />';
+                $chunks[] = $tag;
+                $head .= $tag;
+            }
+
+            if (self::isChecked($settings->seoRobots ?? array('1')) && !self::headHasMetaName($head, 'robots')) {
+                $robots = trim((string) ($settings->seoRobotsValue ?? 'index,follow'));
+                if ($robots !== '') {
+                    $tag = '<meta name="robots" content="' . htmlspecialchars($robots, ENT_QUOTES, 'UTF-8') . '" />';
+                    $chunks[] = $tag;
+                    $head .= $tag;
+                }
+            }
+
+            if (!$strictDedupMode && $homeKeywords !== '' && !self::headHasMetaName($head, 'keywords')) {
+                $tag = '<meta name="keywords" content="' . htmlspecialchars($homeKeywords, ENT_QUOTES, 'UTF-8') . '" />';
+                $chunks[] = $tag;
+                $head .= $tag;
+            }
+
+            if (!$strictDedupMode && $description !== '' && !self::headHasMetaName($head, 'description')) {
+                $tag = '<meta name="description" content="' . htmlspecialchars($description, ENT_QUOTES, 'UTF-8') . '" />';
+                $chunks[] = $tag;
+                $head .= $tag;
+            }
+
+            if (!$strictDedupMode && self::isChecked($settings->seoOg ?? array('1'))) {
+                if (!self::headHasMetaProperty($head, 'og:type')) {
+                    $tag = '<meta property="og:type" content="website" />';
+                    $chunks[] = $tag;
+                    $head .= $tag;
+                }
+                if (!self::headHasMetaProperty($head, 'og:url')) {
+                    $tag = '<meta property="og:url" content="' . htmlspecialchars($url, ENT_QUOTES, 'UTF-8') . '" />';
+                    $chunks[] = $tag;
+                    $head .= $tag;
+                }
+                if ($siteName !== '' && !self::headHasMetaProperty($head, 'og:site_name')) {
+                    $tag = '<meta property="og:site_name" content="' . htmlspecialchars($siteName, ENT_QUOTES, 'UTF-8') . '" />';
+                    $chunks[] = $tag;
+                    $head .= $tag;
+                }
+                if ($title !== '' && !self::headHasMetaProperty($head, 'og:title')) {
+                    $tag = '<meta property="og:title" content="' . htmlspecialchars($title, ENT_QUOTES, 'UTF-8') . '" />';
+                    $chunks[] = $tag;
+                    $head .= $tag;
+                }
+                if ($description !== '' && !self::headHasMetaProperty($head, 'og:description')) {
+                    $tag = '<meta property="og:description" content="' . htmlspecialchars($description, ENT_QUOTES, 'UTF-8') . '" />';
+                    $chunks[] = $tag;
+                    $head .= $tag;
+                }
+            }
+
+            if (!$strictDedupMode && self::isChecked($settings->seoTwitter ?? array('1'))) {
+                if (!self::headHasMetaName($head, 'twitter:card')) {
+                    $tag = '<meta name="twitter:card" content="summary" />';
+                    $chunks[] = $tag;
+                    $head .= $tag;
+                }
+                if ($title !== '' && !self::headHasMetaName($head, 'twitter:title')) {
+                    $tag = '<meta name="twitter:title" content="' . htmlspecialchars($title, ENT_QUOTES, 'UTF-8') . '" />';
+                    $chunks[] = $tag;
+                    $head .= $tag;
+                }
+                if ($description !== '' && !self::headHasMetaName($head, 'twitter:description')) {
+                    $tag = '<meta name="twitter:description" content="' . htmlspecialchars($description, ENT_QUOTES, 'UTF-8') . '" />';
+                    $chunks[] = $tag;
+                    $head .= $tag;
+                }
+            }
+
+            if (self::isChecked($settings->seoJsonLd ?? array('1')) && !self::headHasJsonLdType($head, 'WebSite')) {
+                $jsonLd = array(
+                    '@context' => 'https://schema.org',
+                    '@type' => 'WebSite',
+                    'name' => $siteName,
+                    'url' => $url,
+                    'description' => $description
+                );
+                $chunks[] = '<script type="application/ld+json">'
+                    . json_encode($jsonLd, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                    . '</script>';
+            }
+
+            if (!empty($chunks)) {
+                echo implode("\n", $chunks) . "\n";
+            }
+
             return;
         }
 
-        $settings = self::getPluginSettings();
-        if (!self::isChecked($settings->enableAdvancedSeo ?? array('1'))) {
+        if (!$archive->is('single')) {
             return;
         }
 
@@ -340,42 +581,79 @@ class TypechoMeta_Plugin implements PluginInterface
         $description = self::resolveDescription($archive);
         $keywords = self::resolveKeywords($archive);
         $url = htmlspecialchars((string) $archive->permalink, ENT_QUOTES, 'UTF-8');
-        $siteName = htmlspecialchars((string) $archive->options->title, ENT_QUOTES, 'UTF-8');
+        $siteNameRaw = trim((string) ($archive->options->title ?? ''));
+        if ($siteNameRaw === '') {
+            $siteNameRaw = (string) parse_url((string) ($archive->options->siteUrl ?? ''), PHP_URL_HOST);
+        }
+        if ($siteNameRaw === '') {
+            $siteNameRaw = (string) ($_SERVER['HTTP_HOST'] ?? 'blog.lhl.one');
+        }
+        $siteName = htmlspecialchars($siteNameRaw, ENT_QUOTES, 'UTF-8');
 
-        if (self::isChecked($settings->seoCanonical ?? array('1'))) {
-            echo '<link rel="canonical" href="' . $url . '" />' . "\n";
+        $chunks = array();
+
+        if (!$strictDedupMode && self::isChecked($settings->seoCanonical ?? array('1')) && !self::headHasCanonical($head)) {
+            $tag = '<link rel="canonical" href="' . $url . '" />';
+            $chunks[] = $tag;
+            $head .= $tag;
         }
 
-        if (self::isChecked($settings->seoRobots ?? array('1'))) {
+        if (self::isChecked($settings->seoRobots ?? array('1')) && !self::headHasMetaName($head, 'robots')) {
             $robots = trim((string) ($settings->seoRobotsValue ?? 'index,follow'));
             if ($robots !== '') {
-                echo '<meta name="robots" content="' . htmlspecialchars($robots, ENT_QUOTES, 'UTF-8') . '" />' . "\n";
+                $tag = '<meta name="robots" content="' . htmlspecialchars($robots, ENT_QUOTES, 'UTF-8') . '" />';
+                $chunks[] = $tag;
+                $head .= $tag;
             }
         }
 
-        if (self::isChecked($settings->seoOg ?? array('1'))) {
-            echo '<meta property="og:type" content="article" />' . "\n";
-            echo '<meta property="og:url" content="' . $url . '" />' . "\n";
-            echo '<meta property="og:site_name" content="' . $siteName . '" />' . "\n";
-            if ($title !== '') {
-                echo '<meta property="og:title" content="' . htmlspecialchars($title, ENT_QUOTES, 'UTF-8') . '" />' . "\n";
+        if (!$strictDedupMode && self::isChecked($settings->seoOg ?? array('1'))) {
+            if (!self::headHasMetaProperty($head, 'og:type')) {
+                $tag = '<meta property="og:type" content="article" />';
+                $chunks[] = $tag;
+                $head .= $tag;
             }
-            if ($description !== '') {
-                echo '<meta property="og:description" content="' . htmlspecialchars($description, ENT_QUOTES, 'UTF-8') . '" />' . "\n";
+            if (!self::headHasMetaProperty($head, 'og:url')) {
+                $tag = '<meta property="og:url" content="' . $url . '" />';
+                $chunks[] = $tag;
+                $head .= $tag;
+            }
+            if ($siteName !== '' && !self::headHasMetaProperty($head, 'og:site_name')) {
+                $tag = '<meta property="og:site_name" content="' . $siteName . '" />';
+                $chunks[] = $tag;
+                $head .= $tag;
+            }
+            if ($title !== '' && !self::headHasMetaProperty($head, 'og:title')) {
+                $tag = '<meta property="og:title" content="' . htmlspecialchars($title, ENT_QUOTES, 'UTF-8') . '" />';
+                $chunks[] = $tag;
+                $head .= $tag;
+            }
+            if ($description !== '' && !self::headHasMetaProperty($head, 'og:description')) {
+                $tag = '<meta property="og:description" content="' . htmlspecialchars($description, ENT_QUOTES, 'UTF-8') . '" />';
+                $chunks[] = $tag;
+                $head .= $tag;
             }
         }
 
-        if (self::isChecked($settings->seoTwitter ?? array('1'))) {
-            echo '<meta name="twitter:card" content="summary" />' . "\n";
-            if ($title !== '') {
-                echo '<meta name="twitter:title" content="' . htmlspecialchars($title, ENT_QUOTES, 'UTF-8') . '" />' . "\n";
+        if (!$strictDedupMode && self::isChecked($settings->seoTwitter ?? array('1'))) {
+            if (!self::headHasMetaName($head, 'twitter:card')) {
+                $tag = '<meta name="twitter:card" content="summary" />';
+                $chunks[] = $tag;
+                $head .= $tag;
             }
-            if ($description !== '') {
-                echo '<meta name="twitter:description" content="' . htmlspecialchars($description, ENT_QUOTES, 'UTF-8') . '" />' . "\n";
+            if ($title !== '' && !self::headHasMetaName($head, 'twitter:title')) {
+                $tag = '<meta name="twitter:title" content="' . htmlspecialchars($title, ENT_QUOTES, 'UTF-8') . '" />';
+                $chunks[] = $tag;
+                $head .= $tag;
+            }
+            if ($description !== '' && !self::headHasMetaName($head, 'twitter:description')) {
+                $tag = '<meta name="twitter:description" content="' . htmlspecialchars($description, ENT_QUOTES, 'UTF-8') . '" />';
+                $chunks[] = $tag;
+                $head .= $tag;
             }
         }
 
-        if (self::isChecked($settings->seoJsonLd ?? array('1'))) {
+        if (self::isChecked($settings->seoJsonLd ?? array('1')) && !self::headHasJsonLdType($head, 'Article')) {
             $jsonLd = array(
                 '@context' => 'https://schema.org',
                 '@type' => 'Article',
@@ -391,11 +669,44 @@ class TypechoMeta_Plugin implements PluginInterface
                 ),
                 'publisher' => array(
                     '@type' => 'Organization',
-                    'name' => (string) $archive->options->title
+                    'name' => $siteNameRaw
                 )
             );
-            echo '<script type="application/ld+json">' . json_encode($jsonLd, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . '</script>' . "\n";
+            $chunks[] = '<script type="application/ld+json">'
+                . json_encode($jsonLd, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                . '</script>';
         }
+
+        if (!empty($chunks)) {
+            echo implode("\n", $chunks) . "\n";
+        }
+    }
+
+    private static function headHasCanonical(string $head): bool
+    {
+        return preg_match('/<link\b[^>]*\brel\s*=\s*["\']canonical["\'][^>]*>/i', $head) === 1;
+    }
+
+    private static function headHasMetaName(string $head, string $name): bool
+    {
+        $name = preg_quote($name, '/');
+        return preg_match('/<meta\b[^>]*\bname\s*=\s*["\']' . $name . '["\'][^>]*>/i', $head) === 1;
+    }
+
+    private static function headHasMetaProperty(string $head, string $property): bool
+    {
+        $property = preg_quote($property, '/');
+        return preg_match('/<meta\b[^>]*\bproperty\s*=\s*["\']' . $property . '["\'][^>]*>/i', $head) === 1;
+    }
+
+    private static function headHasJsonLdType(string $head, string $schemaType): bool
+    {
+        if (preg_match('/<script\b[^>]*type\s*=\s*["\']application\/ld\+json["\'][^>]*>(.*?)<\/script>/is', $head, $m) !== 1) {
+            return false;
+        }
+
+        $schemaType = preg_quote($schemaType, '/');
+        return preg_match('/"@type"\s*:\s*"' . $schemaType . '"/i', $m[1]) === 1;
     }
 
     public static function renderEditorAiButton($post): void
